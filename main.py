@@ -3,6 +3,10 @@ import json
 from areas import BENGALURU_AREAS
 from patterns import RENT_PATTERNS, SALE_PATTERNS, REQ_PATTERNS
 
+GENERIC_PHRASES = set([
+    'for rent', 'for sale', 'for lease', 'rent', 'sale', 'lease', 'to let', 'available', 'requirement', 'required', 'needed', 'looking for', 'need', 'wanted', 'want', 'flat for rent', 'apartment for rent', 'house for rent', 'villa for rent', 'shop for rent', 'warehouse for rent', 'office for rent', 'space for rent', 'open for rent', 'for rental', 'commercial space for rent', 'guest house', 'paying guest', 'pg', 'rental', 'rent:', 'sale:', 'lease:'
+])
+
 def parse_multiline_messages(file_path):
     pattern = r'^\[[^\]]+\]\s+(.*?):\s+(.*)'
     messages = []
@@ -45,7 +49,8 @@ def is_irrelevant_message(msg):
         'you deleted this message', 'this message was deleted', 'video omitted',
         'photo omitted', 'image omitted', 'sticker omitted', 'document omitted',
         'pdf omitted', 'file omitted', 'you deleted this message as admin',
-        'this message was edited'
+        'this message was edited',
+        "you're now an admin", 'you are now an admin', 'now an admin', 'is now an admin', 'made you an admin', 'made admin'
     ]
     for p in sys_patterns:
         if p in msg_low:
@@ -57,10 +62,12 @@ def is_irrelevant_message(msg):
         return True
     if re.match(r'^https?://', msg_low):  # Only a link
         return True
-    # Greetings: match at start or end, allow for emojis and "all"
+    # Greetings: match at start or end, allow for emojis and "all" and common group greetings
     greetings = [
-        r'^(hi|hello|good morning|good afternoon|good evening|namaste|thanks|thank you)[\s\W]*$',
-        r'^[\s\W]*(hi|hello|good morning|good afternoon|good evening|namaste|thanks|thank you)[\s\W]*(all)?[\s\W]*$'
+        r'^(hi|hello|hey|dear|greetings|good morning|good afternoon|good evening|namaste|thanks|thank you)[\s\W]*(everyone|all|guys|friends)?[\s\W]*$',
+        r'^[\s\W]*(hi|hello|hey|dear|greetings|good morning|good afternoon|good evening|namaste|thanks|thank you)[\s\W]*(everyone|all|guys|friends)?[\s\W]*$',
+        r'^(hi|hello|hey|dear|greetings)[\s\W]+(everyone|all|guys|friends)[\s\W]*$',
+        r'^(everyone|all|guys|friends)[\s\W]+(hi|hello|hey|dear|greetings)[\s\W]*$'
     ]
     for g in greetings:
         if re.match(g, msg_clean):
@@ -95,23 +102,46 @@ def detect_listing_type(msg):
     return "other"
 
 def extract_location(msg):
-    # 1. Try exact match from area list (longest match first)
     msg_low = msg.lower()
-    sorted_areas = sorted(BENGALURU_AREAS, key=lambda x: -len(x))
-    for area in sorted_areas:
-        area_pat = r'\b' + re.escape(area) + r'\b'
-        if re.search(area_pat, msg_low):
-            return area.title()
-    # 2. Try regex after "location:", "in", "at", "near"
+    # 1. Try to match all known areas (case-insensitive, allow partial and multi-word matches)
+    found_areas = []
+    for area in BENGALURU_AREAS:
+        area_low = area.lower()
+        # Use word boundaries for single-word areas, substring for multi-word
+        if ' ' in area_low:
+            if area_low in msg_low:
+                found_areas.append((msg_low.find(area_low), area))
+        else:
+            for m in re.finditer(r'\b' + re.escape(area_low) + r'\b', msg_low):
+                found_areas.append((m.start(), area))
+    if found_areas:
+        found_areas.sort()
+        # Capitalize each word in area name
+        loc = ' '.join([w.capitalize() for w in found_areas[0][1].split()])
+        if loc.strip().lower() not in GENERIC_PHRASES:
+            return loc
+    # 2. Fallback: try to find the best substring match (fuzzy, but simple)
+    best_area = None
+    best_idx = len(msg_low)
+    for area in BENGALURU_AREAS:
+        area_low = area.lower()
+        idx = msg_low.find(area_low)
+        if idx != -1 and idx < best_idx:
+            best_idx = idx
+            best_area = area
+    if best_area:
+        loc = ' '.join([w.capitalize() for w in best_area.split()])
+        if loc.strip().lower() not in GENERIC_PHRASES:
+            return loc
+    # 3. Fallback: regex after location:, in, at, near (first 2-3 words only)
     m = re.search(r'(?:location:|in|at|near)\s*([A-Za-z0-9\s\-]+)', msg, re.IGNORECASE)
     if m:
         loc = m.group(1).strip()
-        # Remove trailing non-location words
+        loc = ' '.join(loc.split()[:3])
         loc = re.split(r'[\.,;:\n]', loc)[0]
-        # Remove trailing numbers
         loc = re.sub(r'\s+\d+.*$', '', loc)
-        return loc.title()
-    # 3. Fuzzy match (optional, not implemented here)
+        if loc and loc.strip().lower() not in GENERIC_PHRASES:
+            return loc.title()
     return None
 
 def extract_price(msg):
@@ -164,13 +194,25 @@ def extract_property_type(msg):
     return None
 
 def extract_dimensions(msg):
-    # e.g. "1500 sqft", "2 acres", "30x40", "1200 sft", "2400 Sq.ft"
-    m = re.search(r'\b\d{2,5}\s?(?:sqft|sq\.? ?ft|sft|sq ft|acres?|guntas?)\b', msg, re.IGNORECASE)
-    if m:
-        return m.group()
-    m = re.search(r'\b\d{1,3}\s?x\s?\d{1,3}\b', msg)
-    if m:
-        return m.group()
+    # e.g. "1500 sqft", "2 acres", "30x40", "1200 sft", "2400 Sq.ft", "80,000 sq ft"
+    matches = []
+    # 1. Match numbers with optional commas and spaces (e.g., 80,000 sq ft, 20000 sq ft)
+    for m in re.finditer(r'\b([\d,]+)\s?(sq\.? ?ft|sft|sqft|sq ft|acres?|guntas?)\b', msg, re.IGNORECASE):
+        num = m.group(1).replace(',', '').strip()
+        try:
+            val = int(num)
+        except ValueError:
+            continue
+        # Format with commas for readability
+        formatted = f"{val:,} {m.group(2).replace('.', '').replace(' ', '')}"
+        matches.append((val, formatted))
+    # 2. Match 30x40, 40x60, etc.
+    for m in re.finditer(r'\b\d{1,3}\s?x\s?\d{1,3}\b', msg):
+        matches.append((0, m.group()))
+    # Return the largest dimension (by value) if any
+    if matches:
+        matches.sort(reverse=True)
+        return matches[0][1]
     return None
 
 def extract_phone(msg):
@@ -202,14 +244,26 @@ def extract_facing(msg):
     return None
 
 def extract_property_name(msg):
-    # Try to get text before BHK
-    m = re.search(r'([A-Za-z0-9\s&\-\_]{3,})\s+[1-9](?:\.[05])?\s?BHK', msg)
+    msg_low = msg.lower()
+    # 1. Project/complex name after 'in' or 'at' (e.g., 'in Mahaveer Maple')
+    m = re.search(r'(?:in|at)\s+([A-Za-z0-9&\-_ ]{3,40})', msg, re.IGNORECASE)
     if m:
-        return m.group(1).strip()
-    # Try to get property/project name after "at", "in", "project", "property name"
-    m = re.search(r'(?:at|in|project|property name)[:\-]?\s*([A-Za-z0-9\s&\-\_]{3,})', msg, re.IGNORECASE)
+        name = ' '.join(m.group(1).strip().split()[:3])
+        if name.strip().lower() not in GENERIC_PHRASES:
+            return name.strip()
+    # 2. After 'for rent/sale in/at', extract next 1-3 words
+    m = re.search(r'for (?:rent|sale)[^\w]*(?:in|at)\s+([A-Za-z0-9&\-_ ]{3,40})', msg, re.IGNORECASE)
     if m:
-        return m.group(1).strip()
+        name = ' '.join(m.group(1).strip().split()[:3])
+        if name.strip().lower() not in GENERIC_PHRASES:
+            return name.strip()
+    # 3. Before BHK, up to 3 words
+    m = re.search(r'([A-Za-z0-9&\-_ ]{1,40})\s+([1-9](?:\.[05])?\s?BHK)', msg, re.IGNORECASE)
+    if m:
+        before = m.group(1).strip()
+        name = ' '.join(before.split()[-3:])
+        if name.strip().lower() not in GENERIC_PHRASES:
+            return name.strip()
     return None
 
 def extract_info(msg):

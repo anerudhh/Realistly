@@ -12,5 +12,6 @@ BENGALURU_AREAS = [
     "ramamurthy nagar", "kasturi nagar", "kr puram", "mahadevapura", "hoodi", "kundalahalli", "brookefield",
     "kadugodi", "hope farm", "seegehalli", "tc palya", "tc palya road", "old airport road", "domlur", "murugeshpalya",
     "cv raman nagar", "indiranagar", "hal", "marathahalli", "bellandur", "sarjapur road", "harlur road", "haralur",
-    "hsr", "bommasandra"
+    "hsr", "bommasandra", "nelmangala", "akshaya nagar", "hollywood town", "bannerghatta", "arekere", "hulimavu",
+    "gottigere", "police layout", "jayadeva"
 ]
